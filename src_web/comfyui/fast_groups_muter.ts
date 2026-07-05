@@ -12,6 +12,7 @@ import type {
 import {app} from "scripts/app.js";
 import {RgthreeBaseVirtualNode} from "./base_node.js";
 import {NodeTypesString} from "./constants.js";
+import {LogLevel, rgthree} from "./rgthree.js";
 import {SERVICE as FAST_GROUPS_SERVICE} from "./services/fast_groups_service.js";
 import {drawNodeWidget, fitString} from "./utils_canvas.js";
 import {RgthreeBaseWidget} from "./utils_widgets.js";
@@ -193,37 +194,52 @@ export abstract class BaseFastGroupsModeChanger extends RgthreeBaseVirtualNode {
       if (!showAllGraphs && group.graph !== app.canvas.getCurrentGraph()) {
         continue;
       }
-      let isDirty = false;
-      const widgetLabel = `Enable ${group.title}`;
-      let widget = this.widgets.find((w) => w.label === widgetLabel) as FastGroupsToggleRowWidget;
-      if (!widget) {
-        // When we add a widget, litegraph is going to mess up the size, so we
-        // store it so we can retrieve it in computeSize. Hacky..
-        this.tempSize = [...this.size] as Size;
-        widget = this.addCustomWidget(
-          new FastGroupsToggleRowWidget(group, this),
-        ) as FastGroupsToggleRowWidget;
-        this.setSize(this.computeSize());
-        isDirty = true;
-      }
-      if (widget.label != widgetLabel) {
-        widget.label = widgetLabel;
-        isDirty = true;
-      }
-      if (
-        group.rgthree_hasAnyActiveNode != null &&
-        widget.toggled != group.rgthree_hasAnyActiveNode
-      ) {
-        widget.toggled = group.rgthree_hasAnyActiveNode;
-        isDirty = true;
-      }
-      if (this.widgets[index] !== widget) {
-        const oldIndex = this.widgets.findIndex((w) => w === widget);
-        this.widgets.splice(index, 0, this.widgets.splice(oldIndex, 1)[0]!);
-        isDirty = true;
-      }
-      if (isDirty) {
-        this.setDirtyCanvas(true, false);
+      // The whole per-group widget sync is wrapped in try/catch: previously, if any single group
+      // threw while its widget was being created/updated/reordered (e.g. an unexpected state from
+      // a subgraph, or a ComfyUI-internal change to addCustomWidget/computeSize), the loop aborted
+      // right there. That left `index` out of sync with reality, so the "remove all remaining
+      // widgets" cleanup below could delete legitimate widgets for later groups, or leave stale
+      // ones behind - which matches user reports of duplicate/"phantom" group entries.
+      try {
+        let isDirty = false;
+        const widgetLabel = `Enable ${group.title}`;
+        let widget = this.widgets.find((w) => w.label === widgetLabel) as FastGroupsToggleRowWidget;
+        if (!widget) {
+          // When we add a widget, litegraph is going to mess up the size, so we
+          // store it so we can retrieve it in computeSize. Hacky..
+          this.tempSize = [...this.size] as Size;
+          widget = this.addCustomWidget(
+            new FastGroupsToggleRowWidget(group, this),
+          ) as FastGroupsToggleRowWidget;
+          this.setSize(this.computeSize());
+          isDirty = true;
+        }
+        if (widget.label != widgetLabel) {
+          widget.label = widgetLabel;
+          isDirty = true;
+        }
+        if (
+          group.rgthree_hasAnyActiveNode != null &&
+          widget.toggled != group.rgthree_hasAnyActiveNode
+        ) {
+          widget.toggled = group.rgthree_hasAnyActiveNode;
+          isDirty = true;
+        }
+        if (this.widgets[index] !== widget) {
+          const oldIndex = this.widgets.findIndex((w) => w === widget);
+          this.widgets.splice(index, 0, this.widgets.splice(oldIndex, 1)[0]!);
+          isDirty = true;
+        }
+        if (isDirty) {
+          this.setDirtyCanvas(true, false);
+        }
+      } catch (e) {
+        const [n, v] = rgthree.logger.logParts(
+          LogLevel.ERROR,
+          `[${this.type}] Failed to sync widget for group "${group?.title}"; skipping it for this cycle.`,
+          e,
+        );
+        console[n]?.(...v);
       }
       index++;
     }
