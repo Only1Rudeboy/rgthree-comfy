@@ -3,6 +3,7 @@ import type {BaseFastGroupsModeChanger} from "../fast_groups_muter.js";
 
 import {app} from "scripts/app.js";
 import {getGraphDependantNodeKey, getGroupNodes, reduceNodesDepthFirst} from "../utils.js";
+import {LogLevel, rgthree} from "../rgthree.js";
 
 type Vector4 = [number, number, number, number];
 
@@ -60,11 +61,31 @@ class FastGroupsService {
     if (!this.runScheduledForMs) {
       return;
     }
-    for (const node of this.fastGroupNodes) {
-      node.refreshWidgets();
+    // IMPORTANT: this whole body must never let a single node's error escape uncaught. Previously,
+    // if `node.refreshWidgets()` threw for *any* node (e.g. a half-loaded subgraph, or a group with
+    // unexpected data), the loop aborted and `scheduleRun()` below was never reached again -
+    // silently freezing every FastGroupsMuter/Bypasser node for the rest of the session (this is
+    // almost certainly the cause behind reports like "the node sometimes just stops updating").
+    // The try/finally guarantees we always reschedule, and the inner try/catch means one bad node
+    // can't prevent the others from refreshing.
+    try {
+      for (const node of this.fastGroupNodes) {
+        try {
+          node.refreshWidgets();
+        } catch (e) {
+          const [n, v] = rgthree.logger.logParts(
+            LogLevel.ERROR,
+            `[FastGroupsService] refreshWidgets() failed for node #${node.id} (${node.type}); ` +
+              `skipping it for this cycle so other Fast Groups nodes keep working.`,
+            e,
+          );
+          console[n]?.(...v);
+        }
+      }
+    } finally {
+      this.clearScheduledRun();
+      this.scheduleRun();
     }
-    this.clearScheduledRun();
-    this.scheduleRun();
   }
 
   private scheduleRun(ms = 500) {
@@ -98,17 +119,29 @@ class FastGroupsService {
       this.cachedNodeBoundings = reduceNodesDepthFirst(
         app.graph._nodes,
         (node, acc) => {
-          let bounds = node.getBounding();
-          // If the bounds are zero'ed out, then we could be a subgraph that hasn't rendered yet and
-          // need to update them.
-          if (bounds[0] === 0 && bounds[1] === 0 && bounds[2] === 0 && bounds[3] === 0) {
-            const ctx = node.graph?.primaryCanvas?.canvas.getContext("2d");
-            if (ctx) {
-              node.updateArea(ctx);
-              bounds = node.getBounding();
+          try {
+            let bounds = node.getBounding();
+            // If the bounds are zero'ed out, then we could be a subgraph that hasn't rendered yet and
+            // need to update them.
+            if (bounds[0] === 0 && bounds[1] === 0 && bounds[2] === 0 && bounds[3] === 0) {
+              const ctx = node.graph?.primaryCanvas?.canvas.getContext("2d");
+              if (ctx) {
+                node.updateArea(ctx);
+                bounds = node.getBounding();
+              }
             }
+            acc[getGraphDependantNodeKey(node)] = bounds as Vector4;
+          } catch (e) {
+            // Don't let one node's bounding failure (e.g. not-yet-rendered subgraph node) abort
+            // bounding calculation for every other node in the graph. It just won't be included in
+            // any group's node list until this resolves on its own.
+            const [n, v] = rgthree.logger.logParts(
+              LogLevel.DEV,
+              `[FastGroupsService] Could not compute bounding for node #${node.id} (${node.type}); skipping.`,
+              e,
+            );
+            console[n]?.(...v);
           }
-          acc[getGraphDependantNodeKey(node)] = bounds as Vector4;
         },
         {} as {[key: string]: Vector4},
       );
@@ -177,10 +210,21 @@ class FastGroupsService {
         while ((s = subgraphs.next().value)) this.groupsUnsorted.push(...(s.groups ?? []));
       }
       for (const group of this.groupsUnsorted) {
-        this.recomputeInsideNodesForGroup(group);
-        group.rgthree_hasAnyActiveNode = getGroupNodes(group).some(
-          (n) => n.mode === LiteGraph.ALWAYS,
-        );
+        try {
+          this.recomputeInsideNodesForGroup(group);
+          group.rgthree_hasAnyActiveNode = getGroupNodes(group).some(
+            (n) => n.mode === LiteGraph.ALWAYS,
+          );
+        } catch (e) {
+          // Same reasoning as above: one malformed/edge-case group must not break group discovery
+          // for the rest of the workflow.
+          const [n, v] = rgthree.logger.logParts(
+            LogLevel.ERROR,
+            `[FastGroupsService] Failed to process group "${group?.title}"; skipping it for this cycle.`,
+            e,
+          );
+          console[n]?.(...v);
+        }
       }
       this.msLastUnsorted = now;
     }
