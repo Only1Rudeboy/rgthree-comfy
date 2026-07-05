@@ -203,7 +203,17 @@ export abstract class BaseFastGroupsModeChanger extends RgthreeBaseVirtualNode {
       try {
         let isDirty = false;
         const widgetLabel = `Enable ${group.title}`;
-        let widget = this.widgets.find((w) => w.label === widgetLabel) as FastGroupsToggleRowWidget;
+        // IMPORTANT: look up the widget by a reference to the actual group object, not by its
+        // label text. Matching on the label allowed two groups sharing the same title (a common
+        // case: copy-pasted groups, or several groups left with the default "Group" title) to
+        // resolve to the SAME existing widget. The second (and any subsequent) same-titled group
+        // would then "steal" the first group's widget instead of getting its own - which is
+        // exactly the reported bug of duplicate-looking entries that all toggle the same
+        // (first) group. Reference equality on `.group` guarantees a 1:1 widget-to-group mapping
+        // regardless of title collisions.
+        let widget = this.widgets.find(
+          (w) => (w as FastGroupsToggleRowWidget).group === group,
+        ) as FastGroupsToggleRowWidget;
         if (!widget) {
           // When we add a widget, litegraph is going to mess up the size, so we
           // store it so we can retrieve it in computeSize. Hacky..
