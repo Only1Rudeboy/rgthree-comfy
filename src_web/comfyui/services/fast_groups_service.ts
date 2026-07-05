@@ -210,17 +210,32 @@ class FastGroupsService {
         while ((s = subgraphs.next().value)) this.groupsUnsorted.push(...(s.groups ?? []));
       }
       for (const group of this.groupsUnsorted) {
+        // These two steps are intentionally in separate try/catches. If only
+        // `recomputeInsideNodesForGroup` fails (e.g. a not-yet-rendered subgraph node throws while
+        // computing bounds), we still want to attempt `rgthree_hasAnyActiveNode` using whatever
+        // `_children`/nodes the group already had from a previous cycle, rather than leaving the
+        // property unset for this group entirely. An unset value here previously meant the
+        // corresponding muter/bypasser widget's toggled state was silently left stale (see
+        // `refreshWidgets()`'s `group.rgthree_hasAnyActiveNode != null` guard), which looks like a
+        // toggle that "won't turn off" for that one group.
         try {
           this.recomputeInsideNodesForGroup(group);
+        } catch (e) {
+          const [n, v] = rgthree.logger.logParts(
+            LogLevel.ERROR,
+            `[FastGroupsService] Failed to recompute nodes for group "${group?.title}"; using its previous node list for this cycle.`,
+            e,
+          );
+          console[n]?.(...v);
+        }
+        try {
           group.rgthree_hasAnyActiveNode = getGroupNodes(group).some(
             (n) => n.mode === LiteGraph.ALWAYS,
           );
         } catch (e) {
-          // Same reasoning as above: one malformed/edge-case group must not break group discovery
-          // for the rest of the workflow.
           const [n, v] = rgthree.logger.logParts(
             LogLevel.ERROR,
-            `[FastGroupsService] Failed to process group "${group?.title}"; skipping it for this cycle.`,
+            `[FastGroupsService] Failed to determine active state for group "${group?.title}"; skipping it for this cycle.`,
             e,
           );
           console[n]?.(...v);
